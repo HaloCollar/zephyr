@@ -47,11 +47,15 @@ properties:
       The value encodes number of I/O lines used for the opcode,
       address, and data.
 
-      There is no info about quad page program opcodes in the SFDP
-      tables, hence it has been assumed that NOR flash memory
+      The basic flash parameter table of SFDP has no info about quad page
+      program opcodes, hence it has been assumed that NOR flash memory
       supporting 1-4-4 mode also would support fast page programming.
 
-      If absent, then 1-4-4 program page is used in quad mode.
+      If absent, the page program is taken from the SFDP 4-Byte Address
+      Instruction table when the flash has one (1-4-4 if supported, else
+      1-1-4, else 1-1-1 with quad reads), so boards fitted with flash
+      memories of different vendors work; without that table 1-4-4 program
+      page is used in quad mode.
 
   requires-ulbpr:
     type: boolean

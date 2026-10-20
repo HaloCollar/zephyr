@@ -772,7 +772,8 @@ static int flash_stm32_qspi_write(const struct device *dev, off_t addr,
 	};
 
 	qspi_set_address_size(dev, &cmd_pp);
-	if (IS_ENABLED(STM32_QSPI_USE_QUAD_IO)) {
+	if (IS_ENABLED(STM32_QSPI_USE_QUAD_IO) &&
+	    (((struct flash_stm32_qspi_data *)dev->data)->qspi_write_cmd != SPI_NOR_CMD_PP)) {
 		ret = qspi_prepare_quad_program(dev, &cmd_pp);
 		if (ret < 0) {
 			return ret;
@@ -1329,6 +1330,32 @@ static int qspi_program_quad_io(const struct device *dev)
 	return ret;
 }
 
+#if STM32_QSPI_USE_QUAD_IO && !DT_INST_NODE_HAS_PROP(0, writeoc)
+/*
+ * Without writeoc in the devicetree, select the page program from the 4-Byte
+ * Address Instruction table (JESD216 section 6.6) when the flash has one:
+ * 1-4-4 if supported (the default without the table), else 1-1-4, else 1-1-1
+ * with the reads still in quad mode. Flash memories of different vendors
+ * support different quad page programs, so a board that can be fitted with
+ * either needs the choice at run time. Page Program 3Eh and 34h are the
+ * 4-byte address forms of 38h and 32h, which the driver sends.
+ */
+static void spi_nor_process_4bait(const struct device *dev, uint32_t dw1)
+{
+	struct flash_stm32_qspi_data *data = dev->data;
+
+	if ((dw1 & JESD216_SFDP_4B_ADDR_DW1_1S_4S_4S_PP_3E_SUP) != 0U) {
+		data->qspi_write_cmd = SPI_NOR_CMD_PP_1_4_4;
+	} else if ((dw1 & JESD216_SFDP_4B_ADDR_DW1_1S_1S_4S_PP_34_SUP) != 0U) {
+		data->qspi_write_cmd = SPI_NOR_CMD_PP_1_1_4;
+	} else {
+		data->qspi_write_cmd = SPI_NOR_CMD_PP;
+	}
+
+	LOG_INF("Page program instr [0x%x] will be used", data->qspi_write_cmd);
+}
+#endif /* STM32_QSPI_USE_QUAD_IO && !writeoc */
+
 static int spi_nor_process_bfp(const struct device *dev,
 			       const struct jesd216_param_header *php,
 			       const struct jesd216_bfp *bfp)
@@ -1667,9 +1694,9 @@ static int flash_stm32_qspi_init(const struct device *dev)
 #endif
 
 	/* Run NOR init */
-	const uint8_t decl_nph = 2;
+	const uint8_t decl_nph = 4;
 	union {
-		/* We only process BFP so use one parameter block */
+		/* BFP and the 4-Byte Address Instruction table */
 		uint8_t raw[JESD216_SFDP_SIZE(decl_nph)];
 		struct jesd216_sfdp_header sfdp;
 	} u;
@@ -1721,6 +1748,19 @@ static int flash_stm32_qspi_init(const struct device *dev)
 				break;
 			}
 		}
+#if STM32_QSPI_USE_QUAD_IO && !DT_INST_NODE_HAS_PROP(0, writeoc)
+		if (id == JESD216_SFDP_PARAM_ID_4B_ADDR_INSTR) {
+			uint32_t dw1;
+
+			ret = qspi_read_sfdp(dev, jesd216_param_addr(php), (uint8_t *)&dw1,
+					     sizeof(dw1));
+			if (ret != 0) {
+				LOG_ERR("SFDP 4BAIT failed: %d", ret);
+				break;
+			}
+			spi_nor_process_4bait(dev, sys_le32_to_cpu(dw1));
+		}
+#endif /* STM32_QSPI_USE_QUAD_IO && !writeoc */
 		++php;
 	}
 
