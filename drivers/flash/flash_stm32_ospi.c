@@ -2038,6 +2038,41 @@ static inline uint8_t spi_nor_convert_write_to_4b(const uint8_t opcode)
 	}
 }
 
+#if !DT_INST_NODE_HAS_PROP(0, writeoc)
+/*
+ * Without writeoc in the devicetree, select the quad page program from the
+ * 4-Byte Address Instruction table (JESD216 section 6.6) when the flash has
+ * one: 1-4-4 if supported (the default without the table), else 1-1-4, else
+ * 1-1-1 with the reads still in quad mode. Flash memories of different
+ * vendors support different quad page programs, so a board that can be
+ * fitted with either needs the choice at run time. Page Program 3Eh and 34h
+ * are the 4-byte address forms of 38h and 32h.
+ */
+static void spi_nor_process_4bait(const struct device *dev, uint32_t dw1)
+{
+	const struct flash_stm32_ospi_config *dev_cfg = dev->config;
+	struct flash_stm32_ospi_data *data = dev->data;
+
+	if (dev_cfg->data_mode != OSPI_QUAD_MODE) {
+		return;
+	}
+
+	if ((dw1 & JESD216_SFDP_4B_ADDR_DW1_1S_4S_4S_PP_3E_SUP) != 0U) {
+		data->write_opcode = SPI_NOR_CMD_PP_1_4_4;
+	} else if ((dw1 & JESD216_SFDP_4B_ADDR_DW1_1S_1S_4S_PP_34_SUP) != 0U) {
+		data->write_opcode = SPI_NOR_CMD_PP_1_1_4;
+	} else {
+		data->write_opcode = SPI_NOR_CMD_PP;
+	}
+
+	if (IS_ENABLED(DT_INST_PROP(0, four_byte_opcodes))) {
+		data->write_opcode = spi_nor_convert_write_to_4b(data->write_opcode);
+	}
+
+	LOG_INF("Page program instr [0x%x] will be used", data->write_opcode);
+}
+#endif /* !writeoc */
+
 static int spi_nor_process_bfp(const struct device *dev,
 			       const struct jesd216_param_header *php,
 			       const struct jesd216_bfp *bfp)
@@ -2462,9 +2497,9 @@ static int flash_stm32_ospi_init(const struct device *dev)
 
 
 	/* Send the instruction to read the SFDP  */
-	const uint8_t decl_nph = 2;
+	const uint8_t decl_nph = 4;
 	union {
-		/* We only process BFP so use one parameter block */
+		/* BFP and the 4-Byte Address Instruction table */
 		uint8_t raw[JESD216_SFDP_SIZE(decl_nph)];
 		struct jesd216_sfdp_header sfdp;
 	} u;
@@ -2517,25 +2552,29 @@ static int flash_stm32_ospi_init(const struct device *dev)
 			}
 		}
 		if (id == JESD216_SFDP_PARAM_ID_4B_ADDR_INSTR) {
+			union {
+				uint32_t dw[2];
+				struct {
+					uint32_t dummy;
+					uint8_t type[4];
+				} types;
+			} u2;
+
+			ret = ospi_read_sfdp(dev, jesd216_param_addr(php),
+				     (uint8_t *)u2.dw,
+				     MIN(sizeof(uint32_t) * php->len_dw, sizeof(u2.dw)));
+			if (ret != 0) {
+				break;
+			}
+#if !DT_INST_NODE_HAS_PROP(0, writeoc)
+			spi_nor_process_4bait(dev, sys_le32_to_cpu(u2.dw[0]));
+#endif /* !writeoc */
 
 			if (dev_data->address_width == 4U) {
 				/*
 				 * Check table 4 byte address instruction table to get supported
 				 * erase opcodes when running in 4 byte address mode
 				 */
-				union {
-					uint32_t dw[2];
-					struct {
-						uint32_t dummy;
-						uint8_t type[4];
-					} types;
-				} u2;
-				ret = ospi_read_sfdp(dev, jesd216_param_addr(php),
-					     (uint8_t *)u2.dw,
-					     MIN(sizeof(uint32_t) * php->len_dw, sizeof(u2.dw)));
-				if (ret != 0) {
-					break;
-				}
 				for (uint8_t ei = 0; ei < JESD216_NUM_ERASE_TYPES; ++ei) {
 					struct jesd216_erase_type *etp = &dev_data->erase_types[ei];
 					const uint8_t cmd = u2.types.type[ei];
