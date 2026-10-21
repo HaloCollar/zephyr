@@ -276,14 +276,23 @@ int flash_stm32_write_range(const struct device *dev, unsigned int offset,
 	return rc;
 }
 
-#if defined(CONFIG_FLASH_STM32_READOUT_PROTECTION)
+#if defined(CONFIG_FLASH_STM32_READOUT_PROTECTION) || defined(CONFIG_FLASH_STM32_OPTION_BYTES)
 int flash_stm32_option_bytes_write(const struct device *dev, uint32_t mask, uint32_t value)
 {
 	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
 	int rc;
 
+	if (regs->NSCR & FLASH_NSCR_OPTLOCK) {
+		return -EIO;
+	}
+
 	if ((regs->OPTR & mask) == value) {
 		return 0;
+	}
+
+	rc = flash_stm32_wait_flash_idle(dev);
+	if (rc < 0) {
+		return rc;
 	}
 
 	regs->OPTR = (regs->OPTR & ~mask) | value;
@@ -302,6 +311,15 @@ int flash_stm32_option_bytes_write(const struct device *dev, uint32_t mask, uint
 	return 0;
 }
 
+uint32_t flash_stm32_option_bytes_read(const struct device *dev)
+{
+	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
+
+	return regs->OPTR;
+}
+#endif /* CONFIG_FLASH_STM32_READOUT_PROTECTION || CONFIG_FLASH_STM32_OPTION_BYTES */
+
+#if defined(CONFIG_FLASH_STM32_READOUT_PROTECTION)
 uint8_t flash_stm32_get_rdp_level(const struct device *dev)
 {
 	FLASH_TypeDef *regs = FLASH_STM32_REGS(dev);
